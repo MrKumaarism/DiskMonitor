@@ -20,9 +20,11 @@ A sleek, lightweight Windows desktop disk monitor widget.
 
 ## 📥 Download & Installation
 
-Download the latest installer from the **[Releases](https://github.com/MrKumaarism/DiskMonitor/releases)** section:
+You can download the compiled setup installer directly:
 
-1. Download **`DiskMonitor-Setup-v1.02.exe`**
+👉 **[Download DiskMonitor-Setup-v1.02.exe](https://github.com/MrKumaarism/DiskMonitor/raw/main/Installer/DiskMonitor-Setup-v1.02.exe)**
+
+1. Click the link above to download **`DiskMonitor-Setup-v1.02.exe`**
 2. Run the setup wizard to install
 3. DiskMonitor will launch and sit discreetly at the top edge of your screen.
 
