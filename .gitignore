@@ -1,0 +1,24 @@
+# Build outputs
+bin/
+obj/
+
+# Installer output (large binary, built from source)
+Installer/
+
+# Old release folders and archives
+DiskMonitor-Release/
+Final-Release/
+Final-Test/
+*.zip
+
+# Backup files created during editing
+*.backup
+
+# User-specific files
+*.user
+*.suo
+.vs/
+
+# Windows thumbnails
+Thumbs.db
+desktop.ini
