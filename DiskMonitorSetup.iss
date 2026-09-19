@@ -1,5 +1,5 @@
 #define MyAppName "DiskMonitor"
-#define MyAppVersion "1.02"
+#define MyAppVersion "1.03"
 #define MyAppPublisher "DgLogiQ"
 #define MyAppExeName "DiskMonitor.exe"
 
@@ -17,7 +17,7 @@ PrivilegesRequired=lowest
 DisableProgramGroupPage=yes
 
 OutputDir=Installer
-OutputBaseFilename=DiskMonitor-Setup-v1.02
+OutputBaseFilename=DiskMonitor-Setup-v1.03
 
 SetupIconFile=DiskMonitor.ico
 

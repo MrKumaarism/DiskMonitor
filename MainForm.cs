@@ -13,7 +13,7 @@ public class MainForm : Form
 {
     private const string AppName = "DiskMonitor";
     private const string DeveloperName = "DgLogiQ";
-    private const string AppVersion = "1.02";
+    private const string AppVersion = "1.03";
 
     private const string StartupRegistryPath =
         @"Software\Microsoft\Windows\CurrentVersion\Run";
