@@ -8,6 +8,7 @@ DiskMonitor-Release/
 Final-Release/
 Final-Test/
 *.zip
+!Portable/*.zip
 
 # Backup files created during editing
 *.backup

@@ -20,13 +20,16 @@ A sleek, lightweight Windows desktop disk monitor widget.
 
 ## 📥 Download & Installation
 
-You can download the compiled setup installer directly:
+Choose the version that best fits your preference:
 
-👉 **[Download DiskMonitor-Setup-v1.02.exe](https://github.com/MrKumaarism/DiskMonitor/raw/main/Installer/DiskMonitor-Setup-v1.02.exe)**
+| Package | File | Size | Description |
+|---|---|---|---|
+| **🚀 Portable (Recommended)** | **[DiskMonitor.exe](https://github.com/MrKumaarism/DiskMonitor/raw/main/Portable/DiskMonitor.exe)**<br>*(or **[ZIP](https://github.com/MrKumaarism/DiskMonitor/raw/main/Portable/DiskMonitor-Portable-v1.0.2.zip)**)* | **~52 KB**<br>*(~30 KB zip)* | **Zero installation required.** Just download, place anywhere, and run. Supports **"Start with Windows"** via right-click! |
+| **📦 Setup Wizard** | **[DiskMonitor-Setup-v1.02.exe](https://github.com/MrKumaarism/DiskMonitor/raw/main/Installer/DiskMonitor-Setup-v1.02.exe)** | **~2.1 MB** | **Standard Windows installer.** Installs to your user profile, creates Start Menu shortcuts, and includes an uninstaller in Windows Settings. |
 
-1. Click the link above to download **`DiskMonitor-Setup-v1.02.exe`**
-2. Run the setup wizard to install
-3. DiskMonitor will launch and sit discreetly at the top edge of your screen.
+### How to use:
+- **Portable Version**: Download `DiskMonitor.exe` and double-click to launch. To have it start automatically on Windows login, right-click the bar and check **"Start with Windows"**.
+- **Installer Version**: Download and run `DiskMonitor-Setup-v1.02.exe` to follow the setup wizard.
 
 ---
 
