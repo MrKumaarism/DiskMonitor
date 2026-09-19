@@ -24,15 +24,23 @@ public class MainForm : Form
     private const string StartupValueName =
         "DiskMonitor";
 
+    private const string SettingsRegistryPath =
+        @"Software\DgLogiQ\DiskMonitor";
+
+    private const string AlwaysOnTopValueName =
+        "AlwaysOnTop";
+
     // Auto-collapse: seconds before expanded view collapses on its own.
     private const int AutoCollapseSeconds = 8;
 
     private readonly System.Windows.Forms.Timer refreshTimer;
     private System.Windows.Forms.Timer? collapseTimer;
     private readonly ContextMenuStrip menu;
+    private ToolStripMenuItem alwaysOnTopItem = null!;
     private ToolStripMenuItem startWithWindowsItem = null!;
     private readonly List<DriveStat> drives = new();
 
+    private bool alwaysOnTop = true;
     private bool expanded;
     private bool mouseHeld;
     private bool dragging;
@@ -93,7 +101,8 @@ public class MainForm : Form
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
 
-        TopMost = true;
+        alwaysOnTop = LoadAlwaysOnTopSetting();
+        TopMost = alwaysOnTop;
         ShowInTaskbar = false;
 
         BackColor = backgroundColor;
@@ -132,6 +141,18 @@ public class MainForm : Form
 
         menu.Items.Add(
             new ToolStripSeparator()
+        );
+
+        alwaysOnTopItem =
+            new ToolStripMenuItem(
+                "Always on Top"
+            );
+
+        alwaysOnTopItem.Click +=
+            (_, _) => ToggleAlwaysOnTop();
+
+        menu.Items.Add(
+            alwaysOnTopItem
         );
 
         startWithWindowsItem =
@@ -177,6 +198,7 @@ public class MainForm : Form
             UpdateDrives();
             ApplySize();
             PositionAtTopCenter();
+            RefreshAlwaysOnTopState();
             RefreshStartWithWindowsState();
             refreshTimer.Start();
         };
@@ -299,6 +321,70 @@ public class MainForm : Form
             ToggleExpanded();
     }
 
+    private bool LoadAlwaysOnTopSetting()
+    {
+        try
+        {
+            using var key =
+                Registry.CurrentUser.OpenSubKey(
+                    SettingsRegistryPath
+                );
+
+            if (key != null)
+            {
+                object? val =
+                    key.GetValue(
+                        AlwaysOnTopValueName
+                    );
+
+                if (val is int intVal)
+                    return intVal != 0;
+            }
+        }
+        catch { }
+
+        // Always on top by default
+        return true;
+    }
+
+    private void SetAlwaysOnTopSetting(bool enabled)
+    {
+        try
+        {
+            using var key =
+                Registry.CurrentUser.CreateSubKey(
+                    SettingsRegistryPath
+                );
+
+            key?.SetValue(
+                AlwaysOnTopValueName,
+                enabled ? 1 : 0,
+                RegistryValueKind.DWord
+            );
+        }
+        catch { }
+    }
+
+    private void RefreshAlwaysOnTopState()
+    {
+        if (alwaysOnTopItem != null)
+            alwaysOnTopItem.Checked = alwaysOnTop;
+
+        TopMost = alwaysOnTop;
+
+        if (infoPopup != null &&
+            !infoPopup.IsDisposed)
+        {
+            infoPopup.TopMost = alwaysOnTop;
+        }
+    }
+
+    private void ToggleAlwaysOnTop()
+    {
+        alwaysOnTop = !alwaysOnTop;
+        SetAlwaysOnTopSetting(alwaysOnTop);
+        RefreshAlwaysOnTopState();
+    }
 
     private bool IsStartWithWindowsEnabled()
     {
@@ -573,6 +659,7 @@ public class MainForm : Form
 
         PositionInfoPopup();
 
+        infoPopup.TopMost = alwaysOnTop;
         infoPopup.Show(this);
         infoPopup.BringToFront();
     }

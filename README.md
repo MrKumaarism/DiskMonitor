@@ -13,8 +13,9 @@ A sleek, lightweight Windows desktop disk monitor widget.
 - **Mini & Expanded Views**: Discrete minimal bar docked at the top; click to expand for detailed disk usage.
 - **Auto-Collapse**: Expands on click, and automatically collapses back to mini bar after 8 seconds (hovering resets the countdown).
 - **Accurate Real-Time Drive Stats**: Monitor all active drives with color-coded usage bars.
+- **Always on Top**: Floats conveniently on top of all windows by default, with a one-click toggle in the right-click menu.
 - **Auto-Start With Windows**: Toggle auto-launch directly from the right-click context menu.
-- **Ultra Lightweight**: Minimal CPU & memory footprint (~35 KB binary).
+- **Ultra Lightweight**: Minimal CPU & memory footprint (~52 KB binary).
 
 ---
 
