@@ -2,8 +2,6 @@
 bin/
 obj/
 
-# Installer output (large binary, built from source)
-Installer/
 
 # Old release folders and archives
 DiskMonitor-Release/
