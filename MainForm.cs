@@ -13,7 +13,7 @@ public class MainForm : Form
 {
     private const string AppName = "DiskMonitor";
     private const string DeveloperName = "DgLogiQ";
-    private const string AppVersion = "1.04";
+    private const string AppVersion = "1.05";
 
     private const string StartupRegistryPath =
         @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -35,6 +35,16 @@ public class MainForm : Form
 
     // Auto-collapse: seconds before expanded view collapses on its own.
     private const int AutoCollapseSeconds = 8;
+
+    // Smooth expand/collapse animation settings
+    private const int AnimDurationMs = 210;
+    private System.Windows.Forms.Timer? animTimer;
+    private DateTime animStartTime;
+    private Size animStartSize;
+    private Size animTargetSize;
+    private int animCenterX;
+    private int animTopY;
+    private bool isAnimating;
 
     private readonly System.Windows.Forms.Timer refreshTimer;
     private System.Windows.Forms.Timer? collapseTimer;
@@ -219,6 +229,9 @@ public class MainForm : Form
         FormClosed += (_, _) =>
         {
             SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+
+            animTimer?.Stop();
+            animTimer?.Dispose();
 
             collapseTimer?.Stop();
             collapseTimer?.Dispose();
@@ -663,16 +676,6 @@ public class MainForm : Form
 
         expanded = !expanded;
 
-        int oldWidth = Width;
-
-        ApplySize();
-
-        Location = new Point(
-            Location.X -
-            ((Width - oldWidth) / 2),
-            Location.Y
-        );
-
         menu.Items[0].Text =
             expanded
                 ? "Collapse"
@@ -683,7 +686,76 @@ public class MainForm : Form
         else
             StopCollapseTimer();
 
+        StartSizeAnimation();
+    }
+
+    private Size GetTargetSize(bool isExpanded)
+    {
+        int count = Math.Max(drives.Count, 1);
+        if (isExpanded)
+        {
+            return new Size(
+                ExpandedWidth,
+                (count * ExpandedRowHeight) + ExpandedFooterHeight
+            );
+        }
+        else
+        {
+            int width = 178 + ((count - 1) * 118);
+            return new Size(width, MiniHeight);
+        }
+    }
+
+    private void StartSizeAnimation()
+    {
+        animStartSize = ClientSize;
+        animTargetSize = GetTargetSize(expanded);
+
+        if (animStartSize == animTargetSize)
+            return;
+
+        animCenterX = Location.X + (Width / 2);
+        animTopY = Location.Y;
+        animStartTime = DateTime.UtcNow;
+        isAnimating = true;
+
+        if (animTimer == null)
+        {
+            animTimer = new System.Windows.Forms.Timer { Interval = 15 };
+            animTimer.Tick += OnAnimationTick;
+        }
+
+        animTimer.Stop();
+        animTimer.Start();
+    }
+
+    private void OnAnimationTick(object? sender, EventArgs e)
+    {
+        double elapsed = (DateTime.UtcNow - animStartTime).TotalMilliseconds;
+        double t = Math.Min(1.0, elapsed / AnimDurationMs);
+
+        // Quintic/Cubic Ease-Out for a buttery smooth deceleration landing
+        double ease = 1.0 - Math.Pow(1.0 - t, 3);
+
+        int curW = (int)Math.Round(animStartSize.Width + (animTargetSize.Width - animStartSize.Width) * ease);
+        int curH = (int)Math.Round(animStartSize.Height + (animTargetSize.Height - animStartSize.Height) * ease);
+
+        int curX = animCenterX - (curW / 2);
+
+        SetBounds(curX, animTopY, curW, curH, BoundsSpecified.All);
+        UpdateRoundedRegion();
         Invalidate();
+
+        if (t >= 1.0)
+        {
+            animTimer?.Stop();
+            isAnimating = false;
+
+            int finalX = animCenterX - (animTargetSize.Width / 2);
+            SetBounds(finalX, animTopY, animTargetSize.Width, animTargetSize.Height, BoundsSpecified.All);
+            UpdateRoundedRegion();
+            Invalidate();
+        }
     }
 
     // Starts (or restarts) the auto-collapse timer.
@@ -820,37 +892,7 @@ public class MainForm : Form
 
     private void ApplySize()
     {
-        if (expanded)
-        {
-            int count =
-                Math.Max(drives.Count, 1);
-
-            ClientSize =
-                new Size(
-                    ExpandedWidth,
-                    (count *
-                     ExpandedRowHeight) +
-                    ExpandedFooterHeight
-                );
-        }
-        else
-        {
-            int count =
-                Math.Max(drives.Count, 1);
-
-            // One-drive mini bar stays compact,
-            // while leaving room for the info button.
-            int width =
-                178 +
-                ((count - 1) * 118);
-
-            ClientSize =
-                new Size(
-                    width,
-                    MiniHeight
-                );
-        }
-
+        ClientSize = GetTargetSize(expanded);
         UpdateRoundedRegion();
     }
 
@@ -923,24 +965,27 @@ public class MainForm : Form
                 );
             }
 
-            int oldWidth = Width;
-
-            ApplySize();
-
-            if (!expanded &&
-                oldWidth > 0 &&
-                oldWidth != Width)
+            if (!isAnimating)
             {
-                Location =
-                    new Point(
-                        Location.X -
-                        ((Width - oldWidth) / 2),
-                        Location.Y
-                    );
-            }
+                int oldWidth = Width;
 
-            PositionInfoPopup();
-            Invalidate();
+                ApplySize();
+
+                if (!expanded &&
+                    oldWidth > 0 &&
+                    oldWidth != Width)
+                {
+                    Location =
+                        new Point(
+                            Location.X -
+                            ((Width - oldWidth) / 2),
+                            Location.Y
+                        );
+                }
+
+                PositionInfoPopup();
+                Invalidate();
+            }
         }
         catch
         {
@@ -961,6 +1006,8 @@ public class MainForm : Form
             Height <= 0)
             return;
 
+        float radius = (Height > MiniHeight + 10) ? 17f : 14f;
+
         using var path =
             RoundedRectangle(
                 new RectangleF(
@@ -969,7 +1016,7 @@ public class MainForm : Form
                     Width,
                     Height
                 ),
-                expanded ? 17 : 14
+                radius
             );
 
         Region =
@@ -993,7 +1040,7 @@ public class MainForm : Form
             backgroundColor
         );
 
-        if (expanded)
+        if (Height > MiniHeight + 12)
             DrawExpanded(e.Graphics);
         else
             DrawMini(e.Graphics);
@@ -1315,6 +1362,8 @@ public class MainForm : Form
             );
         }
 
+        int footerTop = Height - ExpandedFooterHeight;
+
         if (drives.Count > 0)
         {
             for (
@@ -1322,17 +1371,28 @@ public class MainForm : Form
                 i < drives.Count;
                 i++)
             {
-                DrawExpandedDrive(
-                    g,
-                    drives[i],
-                    5 +
-                    (i *
-                     ExpandedRowHeight)
-                );
+                int rowY = 5 + (i * ExpandedRowHeight);
+                if (rowY + 15 < footerTop)
+                {
+                    var clipState = g.Save();
+                    g.SetClip(new RectangleF(0, rowY, Width, Math.Min(ExpandedRowHeight, Math.Max(0, footerTop - rowY))));
+                    DrawExpandedDrive(
+                        g,
+                        drives[i],
+                        rowY
+                    );
+                    g.Restore(clipState);
+                }
             }
         }
 
-        DrawExpandedFooter(g);
+        if (footerTop >= 15)
+        {
+            var footerState = g.Save();
+            g.SetClip(new RectangleF(0, footerTop, Width, ExpandedFooterHeight));
+            DrawExpandedFooter(g);
+            g.Restore(footerState);
+        }
     }
 
     private void DrawExpandedDrive(
