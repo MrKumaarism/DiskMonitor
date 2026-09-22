@@ -1,5 +1,5 @@
 #define MyAppName "DiskMonitor"
-#define MyAppVersion "1.03"
+#define MyAppVersion "1.04"
 #define MyAppPublisher "DgLogiQ"
 #define MyAppExeName "DiskMonitor.exe"
 
@@ -17,7 +17,7 @@ PrivilegesRequired=lowest
 DisableProgramGroupPage=yes
 
 OutputDir=Installer
-OutputBaseFilename=DiskMonitor-Setup-v1.03
+OutputBaseFilename=DiskMonitor-Setup-v1.04
 
 SetupIconFile=DiskMonitor.ico
 
@@ -39,6 +39,7 @@ Source: "bin\Release\net48\DiskMonitor.exe"; DestDir: "{app}"; Flags: ignorevers
 [Icons]
 Name: "{group}\DiskMonitor"; Filename: "{app}\DiskMonitor.exe"
 Name: "{autodesktop}\DiskMonitor"; Filename: "{app}\DiskMonitor.exe"; Tasks: desktopicon
+Name: "{userstartup}\DiskMonitor"; Filename: "{app}\DiskMonitor.exe"; WorkingDir: "{app}"; Tasks: startup
 
 [Run]
 Filename: "{app}\DiskMonitor.exe"; Tasks: launchapp; Flags: nowait skipifsilent
@@ -50,6 +51,12 @@ const
 
   StartupValue =
     'DiskMonitor';
+
+  StartupApprovedPath =
+    'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run';
+
+  StartupApprovedFolder =
+    'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder';
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
@@ -78,6 +85,16 @@ begin
         StartupKey,
         StartupValue
       );
+      RegDeleteValue(
+        HKCU,
+        StartupApprovedPath,
+        StartupValue
+      );
+      RegDeleteValue(
+        HKCU,
+        StartupApprovedFolder,
+        'DiskMonitor.lnk'
+      );
     end;
   end;
 end;
@@ -92,6 +109,16 @@ begin
       HKCU,
       StartupKey,
       StartupValue
+    );
+    RegDeleteValue(
+      HKCU,
+      StartupApprovedPath,
+      StartupValue
+    );
+    RegDeleteValue(
+      HKCU,
+      StartupApprovedFolder,
+      'DiskMonitor.lnk'
     );
   end;
 end;

@@ -13,13 +13,16 @@ public class MainForm : Form
 {
     private const string AppName = "DiskMonitor";
     private const string DeveloperName = "DgLogiQ";
-    private const string AppVersion = "1.03";
+    private const string AppVersion = "1.04";
 
     private const string StartupRegistryPath =
         @"Software\Microsoft\Windows\CurrentVersion\Run";
 
     private const string StartupApprovedPath =
         @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+
+    private const string StartupApprovedFolder =
+        @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder";
 
     private const string StartupValueName =
         "DiskMonitor";
@@ -193,6 +196,8 @@ public class MainForm : Form
         MouseMove += ResetCollapseTimerOnHover;
         MouseUp += EndMouseAction;
 
+        SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+
         Shown += (_, _) =>
         {
             UpdateDrives();
@@ -200,11 +205,21 @@ public class MainForm : Form
             PositionAtTopCenter();
             RefreshAlwaysOnTopState();
             RefreshStartWithWindowsState();
+
+            // Guarantee startup shortcut synchronization on launch
+            if (IsStartWithWindowsEnabled())
+            {
+                CreateStartupShortcut(Application.ExecutablePath);
+                SetStartupApproved(true);
+            }
+
             refreshTimer.Start();
         };
 
         FormClosed += (_, _) =>
         {
+            SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+
             collapseTimer?.Stop();
             collapseTimer?.Dispose();
 
@@ -386,10 +401,95 @@ public class MainForm : Form
         RefreshAlwaysOnTopState();
     }
 
+    private static string GetStartupShortcutPath()
+    {
+        string startupDir =
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.Startup
+            );
+
+        return Path.Combine(
+            startupDir,
+            "DiskMonitor.lnk"
+        );
+    }
+
+    private static void CreateStartupShortcut(string targetExePath)
+    {
+        try
+        {
+            string shortcutPath = GetStartupShortcutPath();
+            Type? shellType = Type.GetTypeFromProgID("WScript.Shell");
+            if (shellType != null)
+            {
+                object? shell = Activator.CreateInstance(shellType);
+                if (shell != null)
+                {
+                    object? shortcut = shellType.InvokeMember(
+                        "CreateShortcut",
+                        System.Reflection.BindingFlags.InvokeMethod,
+                        null,
+                        shell,
+                        new object[] { shortcutPath }
+                    );
+
+                    if (shortcut != null)
+                    {
+                        Type scType = shortcut.GetType();
+                        scType.InvokeMember("TargetPath", System.Reflection.BindingFlags.SetProperty, null, shortcut, new object[] { targetExePath });
+                        scType.InvokeMember("WorkingDirectory", System.Reflection.BindingFlags.SetProperty, null, shortcut, new object[] { Path.GetDirectoryName(targetExePath) ?? "" });
+                        scType.InvokeMember("Description", System.Reflection.BindingFlags.SetProperty, null, shortcut, new object[] { "DiskMonitor" });
+                        scType.InvokeMember("IconLocation", System.Reflection.BindingFlags.SetProperty, null, shortcut, new object[] { targetExePath + ",0" });
+                        scType.InvokeMember("Save", System.Reflection.BindingFlags.InvokeMethod, null, shortcut, null);
+                    }
+                }
+            }
+        }
+        catch { }
+    }
+
+    private static void DeleteStartupShortcut()
+    {
+        try
+        {
+            string shortcutPath = GetStartupShortcutPath();
+            if (File.Exists(shortcutPath))
+            {
+                File.Delete(shortcutPath);
+            }
+        }
+        catch { }
+    }
+
     private bool IsStartWithWindowsEnabled()
     {
         try
         {
+            // 1. Check Startup folder shortcut (most reliable in Windows 10/11)
+            string shortcutPath = GetStartupShortcutPath();
+            if (File.Exists(shortcutPath))
+            {
+                using var approvedFolderKey =
+                    Registry.CurrentUser.OpenSubKey(
+                        StartupApprovedFolder
+                    );
+
+                byte[]? folderApproved =
+                    approvedFolderKey?.GetValue(
+                        "DiskMonitor.lnk"
+                    ) as byte[];
+
+                if (folderApproved != null &&
+                    folderApproved.Length > 0 &&
+                    folderApproved[0] == 3)
+                {
+                    return false;
+                }
+
+                return true;
+            }
+
+            // 2. Also check HKCU Run key
             using var key =
                 Registry.CurrentUser.OpenSubKey(
                     StartupRegistryPath
@@ -422,10 +522,6 @@ public class MainForm : Form
             if (!pathMatches)
                 return false;
 
-            // Also check the StartupApproved key.
-            // Windows / Task Manager can disable a
-            // Run entry by setting byte[0] = 3 here,
-            // even though the Run key still exists.
             using var approvedKey =
                 Registry.CurrentUser.OpenSubKey(
                     StartupApprovedPath
@@ -440,7 +536,6 @@ public class MainForm : Form
                 approved.Length > 0 &&
                 approved[0] == 3)
             {
-                // Task Manager has disabled it.
                 return false;
             }
 
@@ -473,12 +568,10 @@ public class MainForm : Form
                     StartupRegistryPath
                 );
 
-            if (key == null)
-                return;
-
             if (enable)
             {
-                key.SetValue(
+                // 1. Registry Run key
+                key?.SetValue(
                     StartupValueName,
                     "\"" +
                     Application.ExecutablePath +
@@ -486,18 +579,24 @@ public class MainForm : Form
                     RegistryValueKind.String
                 );
 
-                // Clear any Task Manager "disabled"
-                // override so Windows actually runs
-                // the entry at boot.
+                // 2. Shell Startup folder shortcut (.lnk)
+                CreateStartupShortcut(Application.ExecutablePath);
+
+                // 3. Set Task Manager approved state
                 SetStartupApproved(true);
             }
             else
             {
-                key.DeleteValue(
+                // 1. Delete Run key
+                key?.DeleteValue(
                     StartupValueName,
                     false
                 );
 
+                // 2. Delete Startup shortcut
+                DeleteStartupShortcut();
+
+                // 3. Clear Task Manager state
                 SetStartupApproved(false);
             }
 
@@ -514,44 +613,46 @@ public class MainForm : Form
         }
     }
 
-    // Writes to StartupApproved\Run so Task Manager
-    // shows the correct enabled/disabled state and
-    // Windows doesn't silently skip the entry.
-    //
-    //  byte[0] = 2  → enabled
-    //  byte[0] = 3  → disabled (set by Task Manager)
-    //
+    // Synchronizes StartupApproved registry keys for both Run and StartupFolder
+    // so Task Manager displays Enabled and Windows doesn't delay or skip startup.
     private void SetStartupApproved(bool enable)
     {
         try
         {
-            using var approvedKey =
-                Registry.CurrentUser.CreateSubKey(
-                    StartupApprovedPath
-                );
+            byte[] data = new byte[12];
+            data[0] = 2;
 
-            if (approvedKey == null)
-                return;
-
-            if (enable)
+            using (var approvedRun = Registry.CurrentUser.CreateSubKey(StartupApprovedPath))
             {
-                // 12-byte value; first byte = 2 means enabled.
-                byte[] data = new byte[12];
-                data[0] = 2;
+                if (approvedRun != null)
+                {
+                    if (enable)
+                        approvedRun.SetValue(StartupValueName, data, RegistryValueKind.Binary);
+                    else
+                        approvedRun.DeleteValue(StartupValueName, false);
+                }
+            }
 
-                approvedKey.SetValue(
-                    StartupValueName,
-                    data,
-                    RegistryValueKind.Binary
-                );
-            }
-            else
+            using (var approvedFolder = Registry.CurrentUser.CreateSubKey(StartupApprovedFolder))
             {
-                approvedKey.DeleteValue(
-                    StartupValueName,
-                    false
-                );
+                if (approvedFolder != null)
+                {
+                    if (enable)
+                        approvedFolder.SetValue("DiskMonitor.lnk", data, RegistryValueKind.Binary);
+                    else
+                        approvedFolder.DeleteValue("DiskMonitor.lnk", false);
+                }
             }
+        }
+        catch { }
+    }
+
+    private void OnDisplaySettingsChanged(object? sender, EventArgs e)
+    {
+        try
+        {
+            PositionAtTopCenter();
+            Invalidate();
         }
         catch { }
     }
