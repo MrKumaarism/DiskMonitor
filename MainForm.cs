@@ -13,7 +13,10 @@ public class MainForm : Form
 {
     private const string AppName = "DiskMonitor";
     private const string DeveloperName = "DgLogiQ";
-    private const string AppVersion = "1.05";
+    private const string AppVersion = "1.06";
+
+    private const string ScheduledTaskName =
+        "DiskMonitor";
 
     private const string StartupRegistryPath =
         @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -216,14 +219,41 @@ public class MainForm : Form
             RefreshAlwaysOnTopState();
             RefreshStartWithWindowsState();
 
-            // Guarantee startup shortcut synchronization on launch
+            // Triple-layer autostart synchronization:
+            // If startup is enabled, ensure Scheduled Task, Startup Shortcut, and Run key are all registered
             if (IsStartWithWindowsEnabled())
             {
+                CreateStartupTask(Application.ExecutablePath);
                 CreateStartupShortcut(Application.ExecutablePath);
                 SetStartupApproved(true);
+                try
+                {
+                    using var rk = Registry.CurrentUser.CreateSubKey(StartupRegistryPath);
+                    rk?.SetValue(StartupValueName, "\"" + Application.ExecutablePath + "\"", RegistryValueKind.String);
+                }
+                catch { }
             }
 
             refreshTimer.Start();
+
+            // Startup stabilization timer:
+            // At boot/logon, display drivers and the taskbar may resize or take 1-3 seconds to settle.
+            // Re-assert positioning and topmost state so the widget never vanishes or clips offscreen.
+            var bootTimer = new System.Windows.Forms.Timer { Interval = 1500 };
+            int bootTicks = 0;
+            bootTimer.Tick += (_, _) =>
+            {
+                bootTicks++;
+                PositionAtTopCenter();
+                TopMost = alwaysOnTop;
+                BringToFront();
+                if (bootTicks >= 3)
+                {
+                    bootTimer.Stop();
+                    bootTimer.Dispose();
+                }
+            };
+            bootTimer.Start();
         };
 
         FormClosed += (_, _) =>
@@ -474,11 +504,85 @@ public class MainForm : Form
         catch { }
     }
 
+    // Creates a logon-triggered Windows Scheduled Task for DiskMonitor.
+    // Scheduled tasks bypass Windows 11 startup serialization and run reliably on logon.
+    private static void CreateStartupTask(string targetExePath)
+    {
+        try
+        {
+            Type? schedulerType = Type.GetTypeFromProgID("Schedule.Service");
+            if (schedulerType == null) return;
+
+            dynamic service = Activator.CreateInstance(schedulerType);
+            service.Connect();
+            dynamic folder = service.GetFolder(@"\");
+
+            dynamic taskDef = service.NewTask(0);
+            taskDef.RegistrationInfo.Description = "DiskMonitor Startup Task";
+            taskDef.Settings.DisallowStartIfOnBatteries = false;
+            taskDef.Settings.StopIfGoingOnBatteries = false;
+            taskDef.Settings.ExecutionTimeLimit = "PT0S";
+            taskDef.Settings.Priority = 4;
+
+            // TASK_TRIGGER_LOGON = 9
+            dynamic trigger = taskDef.Triggers.Create(9);
+            trigger.UserId = Environment.UserDomainName + "\\" + Environment.UserName;
+
+            // TASK_ACTION_EXEC = 0
+            dynamic action = taskDef.Actions.Create(0);
+            action.Path = targetExePath;
+            action.WorkingDirectory = Path.GetDirectoryName(targetExePath) ?? "";
+
+            // TASK_CREATE_OR_UPDATE = 6, TASK_LOGON_INTERACTIVE_TOKEN = 3
+            folder.RegisterTaskDefinition(ScheduledTaskName, taskDef, 6, null, null, 3, null);
+        }
+        catch { }
+    }
+
+    private static void DeleteStartupTask()
+    {
+        try
+        {
+            Type? schedulerType = Type.GetTypeFromProgID("Schedule.Service");
+            if (schedulerType == null) return;
+
+            dynamic service = Activator.CreateInstance(schedulerType);
+            service.Connect();
+            dynamic folder = service.GetFolder(@"\");
+            folder.DeleteTask(ScheduledTaskName, 0);
+        }
+        catch { }
+    }
+
+    private static bool IsStartupTaskRegistered()
+    {
+        try
+        {
+            Type? schedulerType = Type.GetTypeFromProgID("Schedule.Service");
+            if (schedulerType == null) return false;
+
+            dynamic service = Activator.CreateInstance(schedulerType);
+            service.Connect();
+            dynamic folder = service.GetFolder(@"\");
+            dynamic task = folder.GetTask(ScheduledTaskName);
+            if (task == null) return false;
+            return (bool)task.Enabled;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private bool IsStartWithWindowsEnabled()
     {
         try
         {
-            // 1. Check Startup folder shortcut (most reliable in Windows 10/11)
+            // 1. Check Windows Scheduled Task (gold-standard on Windows 11)
+            if (IsStartupTaskRegistered())
+                return true;
+
+            // 2. Check Startup folder shortcut (shell:startup)
             string shortcutPath = GetStartupShortcutPath();
             if (File.Exists(shortcutPath))
             {
@@ -502,7 +606,7 @@ public class MainForm : Form
                 return true;
             }
 
-            // 2. Also check HKCU Run key
+            // 3. Also check HKCU Run key
             using var key =
                 Registry.CurrentUser.OpenSubKey(
                     StartupRegistryPath
@@ -583,7 +687,13 @@ public class MainForm : Form
 
             if (enable)
             {
-                // 1. Registry Run key
+                // 1. Windows Scheduled Task (runs on logon with highest reliability)
+                CreateStartupTask(Application.ExecutablePath);
+
+                // 2. Shell Startup folder shortcut (.lnk)
+                CreateStartupShortcut(Application.ExecutablePath);
+
+                // 3. Registry Run key
                 key?.SetValue(
                     StartupValueName,
                     "\"" +
@@ -592,24 +702,24 @@ public class MainForm : Form
                     RegistryValueKind.String
                 );
 
-                // 2. Shell Startup folder shortcut (.lnk)
-                CreateStartupShortcut(Application.ExecutablePath);
-
-                // 3. Set Task Manager approved state
+                // 4. Set Task Manager approved state
                 SetStartupApproved(true);
             }
             else
             {
-                // 1. Delete Run key
+                // 1. Delete Scheduled Task
+                DeleteStartupTask();
+
+                // 2. Delete Startup shortcut
+                DeleteStartupShortcut();
+
+                // 3. Delete Run key
                 key?.DeleteValue(
                     StartupValueName,
                     false
                 );
 
-                // 2. Delete Startup shortcut
-                DeleteStartupShortcut();
-
-                // 3. Clear Task Manager state
+                // 4. Clear Task Manager state
                 SetStartupApproved(false);
             }
 
@@ -664,8 +774,14 @@ public class MainForm : Form
     {
         try
         {
-            PositionAtTopCenter();
-            Invalidate();
+            BeginInvoke(new Action(() =>
+            {
+                ApplySize();
+                PositionAtTopCenter();
+                TopMost = alwaysOnTop;
+                BringToFront();
+                Invalidate();
+            }));
         }
         catch { }
     }
@@ -907,12 +1023,28 @@ public class MainForm : Form
         var area =
             screen.WorkingArea;
 
-        Location =
-            new Point(
-                area.Left +
-                (area.Width - Width) / 2,
-                area.Top + 8
-            );
+        if (area.Width <= 0 || area.Height <= 0)
+            return;
+
+        Size currentOrTarget = (Width > 0 && Height > 0) ? Size : GetTargetSize(expanded);
+        int targetWidth = currentOrTarget.Width;
+        int targetHeight = currentOrTarget.Height;
+
+        int x = area.Left + Math.Max(0, (area.Width - targetWidth) / 2);
+        int y = area.Top + 8;
+
+        // Ensure window is strictly within visible bounds of primary screen
+        if (x + targetWidth > area.Right)
+            x = Math.Max(area.Left, area.Right - targetWidth);
+        if (x < area.Left)
+            x = area.Left;
+
+        if (y + targetHeight > area.Bottom)
+            y = Math.Max(area.Top, area.Bottom - targetHeight);
+        if (y < area.Top)
+            y = area.Top;
+
+        Location = new Point(x, y);
     }
 
     private void UpdateDrives()

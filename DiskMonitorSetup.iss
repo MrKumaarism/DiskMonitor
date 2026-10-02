@@ -1,5 +1,5 @@
 #define MyAppName "DiskMonitor"
-#define MyAppVersion "1.05"
+#define MyAppVersion "1.06"
 #define MyAppPublisher "DgLogiQ"
 #define MyAppExeName "DiskMonitor.exe"
 
@@ -17,7 +17,7 @@ PrivilegesRequired=lowest
 DisableProgramGroupPage=yes
 
 OutputDir=Installer
-OutputBaseFilename=DiskMonitor-Setup-v1.05
+OutputBaseFilename=DiskMonitor-Setup-v1.06
 
 SetupIconFile=DiskMonitor.ico
 
@@ -30,8 +30,8 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a Desktop shortcut"; GroupDescription: "Additional options:"
-Name: "startup"; Description: "Start DiskMonitor with Windows"; GroupDescription: "Additional options:"
-Name: "launchapp"; Description: "Launch DiskMonitor after installation"; GroupDescription: "Additional options:"
+Name: "startup"; Description: "Start DiskMonitor with Windows"; GroupDescription: "Additional options:"; Flags: checkedonce
+Name: "launchapp"; Description: "Launch DiskMonitor after installation"; GroupDescription: "Additional options:"; Flags: checkedonce
 
 [Files]
 Source: "bin\Release\net48\DiskMonitor.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -61,6 +61,7 @@ const
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ExePath: String;
+  ResultCode: Integer;
 begin
   if CurStep = ssPostInstall then
   begin
@@ -95,6 +96,7 @@ begin
         StartupApprovedFolder,
         'DiskMonitor.lnk'
       );
+      Exec('schtasks.exe', '/delete /tn "DiskMonitor" /f', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     end;
   end;
 end;
@@ -102,6 +104,8 @@ end;
 procedure CurUninstallStepChanged(
   CurUninstallStep: TUninstallStep
 );
+var
+  ResultCode: Integer;
 begin
   if CurUninstallStep = usUninstall then
   begin
@@ -120,5 +124,6 @@ begin
       StartupApprovedFolder,
       'DiskMonitor.lnk'
     );
+    Exec('schtasks.exe', '/delete /tn "DiskMonitor" /f', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 end;
