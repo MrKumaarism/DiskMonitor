@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
+using System.Media;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
@@ -13,7 +15,7 @@ public class MainForm : Form
 {
     private const string AppName = "DiskMonitor";
     private const string DeveloperName = "DgLogiQ";
-    private const string AppVersion = "1.06";
+    private const string AppVersion = "1.07";
 
     private const string ScheduledTaskName =
         "DiskMonitor";
@@ -54,6 +56,7 @@ public class MainForm : Form
     private readonly ContextMenuStrip menu;
     private ToolStripMenuItem alwaysOnTopItem = null!;
     private ToolStripMenuItem startWithWindowsItem = null!;
+    private ToolStripMenuItem powerTimerCancelItem = null!;
     private readonly List<DriveStat> drives = new();
 
     private bool alwaysOnTop = true;
@@ -76,6 +79,34 @@ public class MainForm : Form
     private const int ExpandedRowHeight = 80;
     private const int ExpandedFooterHeight = 40;
 
+    // Power Timer section layout constants
+    private const int PowerTimerHeaderHeight = 38;
+    private const int PowerTimerContentHeight = 130;
+    private const int PowerTimerWarningSeconds = 30;
+
+    // Power Timer state
+    private bool powerTimerSectionExpanded;
+    private bool powerTimerActive;
+    private int powerTimerAction; // 0=Shutdown, 1=Sleep, 2=Hibernate
+    private int powerTimerSelectedMinutes = 30;
+    private DateTime powerTimerEndTime;
+    private System.Windows.Forms.Timer? powerTimerTickTimer;
+    private PowerTimerWarningForm? powerTimerWarning;
+    private bool powerTimerWarningShown;
+    private TextBox? customMinutesBox;
+
+    // Power Timer hit-test regions (set during paint)
+    private RectangleF ptHeaderRect;
+    private readonly RectangleF[] ptActionRects = new RectangleF[3];
+    private readonly RectangleF[] ptPresetRects = new RectangleF[4];
+    private RectangleF ptCustomBoxRect;
+    private RectangleF ptStartBtnRect;
+    private RectangleF ptCancelBtnRect;
+
+    private static readonly string[] PowerActionNames = { "Shutdown", "Sleep", "Hibernate" };
+    private static readonly string[] PowerActionIcons = { "\u23FB", "\u23FE", "\u2B55" };
+    private static readonly int[] PresetMinutes = { 15, 30, 45, 60 };
+
     private readonly Color backgroundColor =
         Color.FromArgb(9, 23, 37);
 
@@ -93,6 +124,12 @@ public class MainForm : Form
 
     private readonly Color warningColor =
         Color.FromArgb(255, 70, 70);
+
+    private readonly Color accentGreen =
+        Color.FromArgb(0, 200, 120);
+
+    private readonly Color yellowColor =
+        Color.FromArgb(255, 200, 0);
 
     public MainForm()
     {
@@ -159,6 +196,30 @@ public class MainForm : Form
             new ToolStripSeparator()
         );
 
+        // Power Timer submenu
+        var powerTimerMenu = new ToolStripMenuItem("Power Timer");
+        powerTimerMenu.DropDownItems.Add("Shutdown in 15 min", null, (_, _) => QuickPowerTimer(0, 15));
+        powerTimerMenu.DropDownItems.Add("Shutdown in 30 min", null, (_, _) => QuickPowerTimer(0, 30));
+        powerTimerMenu.DropDownItems.Add("Sleep in 15 min", null, (_, _) => QuickPowerTimer(1, 15));
+        powerTimerMenu.DropDownItems.Add("Sleep in 30 min", null, (_, _) => QuickPowerTimer(1, 30));
+        powerTimerMenu.DropDownItems.Add(new ToolStripSeparator());
+        powerTimerMenu.DropDownItems.Add("Custom...", null, (_, _) =>
+        {
+            if (!expanded) ToggleExpanded();
+            powerTimerSectionExpanded = true;
+            StartSizeAnimation();
+        });
+        powerTimerMenu.DropDownItems.Add(new ToolStripSeparator());
+        powerTimerCancelItem = new ToolStripMenuItem("Cancel Timer", null, (_, _) => CancelPowerTimer());
+        powerTimerCancelItem.Visible = false;
+        powerTimerMenu.DropDownItems.Add(powerTimerCancelItem);
+        menu.Items.Add(powerTimerMenu);
+        menu.Opening += (_, _) => { powerTimerCancelItem.Visible = powerTimerActive; };
+
+        menu.Items.Add(
+            new ToolStripSeparator()
+        );
+
         alwaysOnTopItem =
             new ToolStripMenuItem(
                 "Always on Top"
@@ -207,6 +268,8 @@ public class MainForm : Form
         MouseDown += BeginMouseAction;
         MouseMove += ContinueMouseAction;
         MouseMove += ResetCollapseTimerOnHover;
+        MouseMove += (_, e) => UpdateCursor(e.Location);
+        MouseLeave += (_, _) => Cursor = Cursors.Default;
         MouseUp += EndMouseAction;
 
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
@@ -266,10 +329,19 @@ public class MainForm : Form
             collapseTimer?.Stop();
             collapseTimer?.Dispose();
 
+            powerTimerTickTimer?.Stop();
+            powerTimerTickTimer?.Dispose();
+
             if (infoPopup != null &&
                 !infoPopup.IsDisposed)
             {
                 infoPopup.Close();
+            }
+
+            if (powerTimerWarning != null &&
+                !powerTimerWarning.IsDisposed)
+            {
+                powerTimerWarning.Close();
             }
         };
 
@@ -289,6 +361,231 @@ public class MainForm : Form
         }
     }
 
+    // ─────────────────────────────────────────────
+    // Power Timer Logic
+    // ─────────────────────────────────────────────
+
+    private void QuickPowerTimer(int action, int minutes)
+    {
+        powerTimerAction = action;
+        powerTimerSelectedMinutes = minutes;
+        if (customMinutesBox != null)
+            customMinutesBox.Text = minutes.ToString();
+        StartPowerTimer();
+    }
+
+    private void StartPowerTimer()
+    {
+        if (powerTimerSelectedMinutes <= 0)
+            return;
+
+        powerTimerActive = true;
+        powerTimerWarningShown = false;
+        powerTimerEndTime = DateTime.UtcNow.AddMinutes(powerTimerSelectedMinutes);
+        powerTimerCancelItem.Visible = true;
+
+        if (customMinutesBox != null)
+            customMinutesBox.Visible = false;
+
+        if (powerTimerTickTimer == null)
+        {
+            powerTimerTickTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+            powerTimerTickTimer.Tick += OnPowerTimerTick;
+        }
+
+        powerTimerTickTimer.Start();
+
+        // Save last used action preference
+        SavePowerTimerPreference();
+
+        if (!expanded)
+            StartSizeAnimation();
+        else
+            Invalidate();
+    }
+
+    private void CancelPowerTimer()
+    {
+        powerTimerActive = false;
+        powerTimerWarningShown = false;
+        powerTimerTickTimer?.Stop();
+        powerTimerCancelItem.Visible = false;
+
+        if (powerTimerWarning != null &&
+            !powerTimerWarning.IsDisposed)
+        {
+            powerTimerWarning.Close();
+            powerTimerWarning = null;
+        }
+
+        if (!expanded)
+        {
+            StartSizeAnimation();
+        }
+        else
+        {
+            if (powerTimerSectionExpanded)
+                EnsureCustomMinutesBox();
+            Invalidate();
+        }
+    }
+
+    private void OnPowerTimerTick(object? sender, EventArgs e)
+    {
+        if (!powerTimerActive) return;
+
+        TimeSpan remaining = powerTimerEndTime - DateTime.UtcNow;
+
+        if (remaining.TotalSeconds <= 0)
+        {
+            // Execute the action
+            powerTimerTickTimer?.Stop();
+            powerTimerActive = false;
+            powerTimerCancelItem.Visible = false;
+
+            if (powerTimerWarning != null &&
+                !powerTimerWarning.IsDisposed)
+            {
+                powerTimerWarning.Close();
+                powerTimerWarning = null;
+            }
+
+            Invalidate();
+            ExecutePowerAction();
+            return;
+        }
+
+        // Show warning at 30 seconds
+        if (remaining.TotalSeconds <= PowerTimerWarningSeconds && !powerTimerWarningShown)
+        {
+            powerTimerWarningShown = true;
+            ShowPowerTimerWarning();
+        }
+
+        // Update warning countdown if visible
+        if (powerTimerWarning != null &&
+            !powerTimerWarning.IsDisposed &&
+            powerTimerWarning.Visible)
+        {
+            powerTimerWarning.UpdateCountdown((int)Math.Ceiling(remaining.TotalSeconds));
+        }
+
+        Invalidate();
+    }
+
+    private void ShowPowerTimerWarning()
+    {
+        try { SystemSounds.Exclamation.Play(); }
+        catch { }
+
+        if (powerTimerWarning != null && !powerTimerWarning.IsDisposed)
+            powerTimerWarning.Close();
+
+        powerTimerWarning = new PowerTimerWarningForm(
+            PowerActionNames[powerTimerAction],
+            backgroundColor, borderColor, mutedColor, warningColor, blueColor
+        );
+
+        powerTimerWarning.CancelRequested += (_, _) => CancelPowerTimer();
+        powerTimerWarning.ProceedRequested += (_, _) =>
+        {
+            powerTimerEndTime = DateTime.UtcNow; // trigger immediate execution on next tick
+        };
+
+        // Position above/near the main form
+        var screen = Screen.PrimaryScreen;
+        if (screen != null)
+        {
+            var area = screen.WorkingArea;
+            powerTimerWarning.Location = new Point(
+                area.Left + (area.Width - powerTimerWarning.Width) / 2,
+                area.Top + (area.Height - powerTimerWarning.Height) / 2
+            );
+        }
+
+        powerTimerWarning.TopMost = true;
+        powerTimerWarning.Show();
+        powerTimerWarning.BringToFront();
+    }
+
+    private void ExecutePowerAction()
+    {
+        try
+        {
+            switch (powerTimerAction)
+            {
+                case 0: // Shutdown
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "shutdown",
+                        Arguments = "/s /t 0",
+                        CreateNoWindow = true,
+                        UseShellExecute = false
+                    });
+                    break;
+
+                case 1: // Sleep
+                    Application.SetSuspendState(PowerState.Suspend, false, false);
+                    break;
+
+                case 2: // Hibernate
+                    Application.SetSuspendState(PowerState.Hibernate, false, false);
+                    break;
+            }
+        }
+        catch { }
+    }
+
+    private void SavePowerTimerPreference()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.CreateSubKey(SettingsRegistryPath);
+            key?.SetValue("LastPowerAction", powerTimerAction, RegistryValueKind.DWord);
+        }
+        catch { }
+    }
+
+    private void LoadPowerTimerPreference()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(SettingsRegistryPath);
+            if (key != null)
+            {
+                object? val = key.GetValue("LastPowerAction");
+                if (val is int intVal && intVal >= 0 && intVal <= 2)
+                    powerTimerAction = intVal;
+            }
+        }
+        catch { }
+    }
+
+    private TimeSpan GetPowerTimerRemaining()
+    {
+        if (!powerTimerActive) return TimeSpan.Zero;
+        var rem = powerTimerEndTime - DateTime.UtcNow;
+        return rem.TotalSeconds > 0 ? rem : TimeSpan.Zero;
+    }
+
+    private string FormatCountdown(TimeSpan ts)
+    {
+        if (ts.TotalHours >= 1)
+            return $"{(int)ts.TotalHours}:{ts.Minutes:D2}:{ts.Seconds:D2}";
+        return $"{ts.Minutes:D2}:{ts.Seconds:D2}";
+    }
+
+    private Color GetCountdownColor(TimeSpan remaining)
+    {
+        if (remaining.TotalSeconds <= 60) return warningColor;
+        if (remaining.TotalMinutes <= 5) return yellowColor;
+        return Color.White;
+    }
+
+    // ─────────────────────────────────────────────
+    // Mouse Handling
+    // ─────────────────────────────────────────────
+
     private void BeginMouseAction(
         object? sender,
         MouseEventArgs e)
@@ -304,6 +601,10 @@ public class MainForm : Form
             infoPressed = true;
             return;
         }
+
+        // Check power timer hit regions in expanded view
+        if (expanded && HandlePowerTimerClick(e.Location))
+            return;
 
         infoPressed = false;
         mouseHeld = true;
@@ -378,6 +679,213 @@ public class MainForm : Form
         if (!wasDragging)
             ToggleExpanded();
     }
+
+    private bool HandlePowerTimerClick(Point location)
+    {
+        // Power timer header click — toggle section
+        if (ptHeaderRect.Contains(location))
+        {
+            powerTimerSectionExpanded = !powerTimerSectionExpanded;
+
+            if (!powerTimerSectionExpanded && customMinutesBox != null)
+                customMinutesBox.Visible = false;
+
+            StartSizeAnimation();
+
+            if (powerTimerSectionExpanded)
+            {
+                if (!powerTimerActive)
+                    EnsureCustomMinutesBox();
+                StartCollapseTimer(); // reset auto-collapse
+            }
+
+            return true;
+        }
+
+        if (!powerTimerSectionExpanded) return false;
+
+        // Action buttons (Shutdown / Sleep / Hibernate)
+        for (int i = 0; i < 3; i++)
+        {
+            if (ptActionRects[i].Contains(location) && !powerTimerActive)
+            {
+                powerTimerAction = i;
+                StartCollapseTimer();
+                Invalidate();
+                return true;
+            }
+        }
+
+        // Preset buttons (15, 30, 45, 60)
+        for (int i = 0; i < PresetMinutes.Length; i++)
+        {
+            if (ptPresetRects[i].Contains(location) && !powerTimerActive)
+            {
+                powerTimerSelectedMinutes = PresetMinutes[i];
+                if (customMinutesBox != null)
+                    customMinutesBox.Text = powerTimerSelectedMinutes.ToString();
+                StartCollapseTimer();
+                Invalidate();
+                return true;
+            }
+        }
+
+        // Start button
+        if (ptStartBtnRect.Contains(location) && !powerTimerActive)
+        {
+            // Read custom box value
+            if (customMinutesBox != null && int.TryParse(customMinutesBox.Text, out int mins) && mins > 0)
+                powerTimerSelectedMinutes = mins;
+
+            StartPowerTimer();
+            StartCollapseTimer();
+            return true;
+        }
+
+        // Cancel button
+        if (ptCancelBtnRect.Contains(location) && powerTimerActive)
+        {
+            CancelPowerTimer();
+            StartCollapseTimer();
+            return true;
+        }
+
+        // Click inside section — consume but don't toggle expanded
+        float ptSectionTop = ptHeaderRect.Bottom;
+        if (location.Y >= ptSectionTop && location.Y <= ptSectionTop + PowerTimerContentHeight)
+        {
+            StartCollapseTimer();
+            return true;
+        }
+
+        return false;
+    }
+
+    private void UpdateCursor(Point location)
+    {
+        if (mouseHeld || dragging)
+        {
+            Cursor = Cursors.Default;
+            return;
+        }
+
+        if (!expanded)
+        {
+            if (!powerTimerActive && infoButtonRect.Contains(location))
+                Cursor = Cursors.Hand;
+            else
+                Cursor = Cursors.Default;
+            return;
+        }
+
+        if (ptHeaderRect.Contains(location))
+        {
+            Cursor = Cursors.Hand;
+            return;
+        }
+
+        if (powerTimerSectionExpanded)
+        {
+            if (!powerTimerActive)
+            {
+                for (int i = 0; i < 3; i++)
+                {
+                    if (ptActionRects[i].Contains(location)) { Cursor = Cursors.Hand; return; }
+                }
+                for (int i = 0; i < PresetMinutes.Length; i++)
+                {
+                    if (ptPresetRects[i].Contains(location)) { Cursor = Cursors.Hand; return; }
+                }
+                if (ptStartBtnRect.Contains(location)) { Cursor = Cursors.Hand; return; }
+            }
+            else
+            {
+                if (ptCancelBtnRect.Contains(location)) { Cursor = Cursors.Hand; return; }
+            }
+        }
+
+        Cursor = Cursors.Default;
+    }
+
+    private void EnsureCustomMinutesBox()
+    {
+        if (customMinutesBox != null && !customMinutesBox.IsDisposed)
+        {
+            customMinutesBox.Visible = true;
+            return;
+        }
+
+        customMinutesBox = new TextBox
+        {
+            BorderStyle = BorderStyle.None,
+            BackColor = Color.FromArgb(17, 36, 55),
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 10f, FontStyle.Regular),
+            TextAlign = HorizontalAlignment.Center,
+            MaxLength = 4,
+            Text = powerTimerSelectedMinutes.ToString()
+        };
+
+        customMinutesBox.KeyPress += (_, ke) =>
+        {
+            if (!char.IsDigit(ke.KeyChar) && ke.KeyChar != (char)8) // allow backspace
+                ke.Handled = true;
+        };
+
+        customMinutesBox.KeyDown += (_, ke) =>
+        {
+            if (ke.KeyCode == Keys.Enter)
+            {
+                ke.SuppressKeyPress = true;
+                if (int.TryParse(customMinutesBox.Text, out int m) && m > 0)
+                {
+                    powerTimerSelectedMinutes = m;
+                    StartPowerTimer();
+                    StartCollapseTimer();
+                }
+            }
+        };
+
+        customMinutesBox.TextChanged += (_, _) =>
+        {
+            if (int.TryParse(customMinutesBox.Text, out int v) && v > 0)
+            {
+                powerTimerSelectedMinutes = v;
+                Invalidate();
+            }
+        };
+
+        customMinutesBox.GotFocus += (_, _) => customMinutesBox.SelectAll();
+        customMinutesBox.MouseClick += (_, _) => customMinutesBox.SelectAll();
+
+        Controls.Add(customMinutesBox);
+        customMinutesBox.BringToFront();
+    }
+
+    private void PositionCustomMinutesBox()
+    {
+        if (customMinutesBox == null || customMinutesBox.IsDisposed) return;
+
+        if (!expanded || !powerTimerSectionExpanded || powerTimerActive)
+        {
+            customMinutesBox.Visible = false;
+            return;
+        }
+
+        customMinutesBox.Visible = true;
+        customMinutesBox.Location = new Point(
+            (int)ptCustomBoxRect.X + 4,
+            (int)ptCustomBoxRect.Y + 3
+        );
+        customMinutesBox.Size = new Size(
+            (int)ptCustomBoxRect.Width - 8,
+            (int)ptCustomBoxRect.Height - 6
+        );
+    }
+
+    // ─────────────────────────────────────────────
+    // Settings persistence
+    // ─────────────────────────────────────────────
 
     private bool LoadAlwaysOnTopSetting()
     {
@@ -786,6 +1294,10 @@ public class MainForm : Form
         catch { }
     }
 
+    // ─────────────────────────────────────────────
+    // Expand / Collapse & Animation
+    // ─────────────────────────────────────────────
+
     private void ToggleExpanded()
     {
         HideInfoPopup();
@@ -796,6 +1308,22 @@ public class MainForm : Form
             expanded
                 ? "Collapse"
                 : "Expand";
+
+        if (!expanded)
+        {
+            powerTimerSectionExpanded = false;
+            if (customMinutesBox != null)
+                customMinutesBox.Visible = false;
+        }
+        else
+        {
+            // Auto-expand power timer section when timer is active
+            if (powerTimerActive)
+                powerTimerSectionExpanded = true;
+
+            // Load preference when expanding
+            LoadPowerTimerPreference();
+        }
 
         if (expanded)
             StartCollapseTimer();
@@ -810,20 +1338,34 @@ public class MainForm : Form
         int count = Math.Max(drives.Count, 1);
         if (isExpanded)
         {
-            return new Size(
-                ExpandedWidth,
-                (count * ExpandedRowHeight) + ExpandedFooterHeight
-            );
+            int height = (count * ExpandedRowHeight) + ExpandedFooterHeight;
+
+            // Add power timer header
+            height += PowerTimerHeaderHeight;
+
+            // Add power timer content if section is expanded
+            if (powerTimerSectionExpanded)
+                height += PowerTimerContentHeight;
+
+            return new Size(ExpandedWidth, height);
         }
         else
         {
             int width = 178 + ((count - 1) * 118);
+
+            // When timer is active, ensure enough width for countdown text
+            if (powerTimerActive)
+                width = Math.Max(width, 230);
+
             return new Size(width, MiniHeight);
         }
     }
 
     private void StartSizeAnimation()
     {
+        if (customMinutesBox != null)
+            customMinutesBox.Visible = false;
+
         animStartSize = ClientSize;
         animTargetSize = GetTargetSize(expanded);
 
@@ -870,6 +1412,7 @@ public class MainForm : Form
             int finalX = animCenterX - (animTargetSize.Width / 2);
             SetBounds(finalX, animTopY, animTargetSize.Width, animTargetSize.Height, BoundsSpecified.All);
             UpdateRoundedRegion();
+            PositionCustomMinutesBox();
             Invalidate();
         }
     }
@@ -1155,6 +1698,10 @@ public class MainForm : Form
             new Region(path);
     }
 
+    // ─────────────────────────────────────────────
+    // Painting
+    // ─────────────────────────────────────────────
+
     protected override void OnPaint(
         PaintEventArgs e)
     {
@@ -1212,6 +1759,13 @@ public class MainForm : Form
                 borderPen,
                 path
             );
+        }
+
+        // If power timer is active, show countdown instead of drives
+        if (powerTimerActive)
+        {
+            DrawMiniCountdown(g);
+            return;
         }
 
         // Information button on the right.
@@ -1392,6 +1946,39 @@ public class MainForm : Form
         }
     }
 
+    private void DrawMiniCountdown(Graphics g)
+    {
+        TimeSpan remaining = GetPowerTimerRemaining();
+        Color countdownColor = GetCountdownColor(remaining);
+        string actionName = PowerActionNames[powerTimerAction];
+        string countdown = FormatCountdown(remaining);
+
+        using var iconFont = new Font("Segoe UI", 12.5f, FontStyle.Regular);
+        using var actionFont = new Font("Segoe UI Semibold", 9.5f, FontStyle.Bold);
+        using var timerFont = new Font("Consolas", 12.5f, FontStyle.Bold);
+        using var actionBrush = new SolidBrush(mutedColor);
+        using var timerBrush = new SolidBrush(countdownColor);
+
+        // Power icon
+        string icon = "\u23FB"; // ⏻
+        SizeF iconSize = g.MeasureString(icon, iconFont);
+        SizeF nameSize = g.MeasureString(actionName, actionFont);
+        SizeF timerSize = g.MeasureString(countdown, timerFont);
+
+        float totalW = iconSize.Width + 4 + nameSize.Width + 8 + timerSize.Width;
+        float startX = Math.Max(12, (Width - totalW) / 2f);
+
+        g.DrawString(icon, iconFont, timerBrush, new PointF(startX, (MiniHeight - iconSize.Height) / 2f));
+
+        // Action name
+        float nameX = startX + iconSize.Width + 4;
+        g.DrawString(actionName, actionFont, actionBrush, new PointF(nameX, (MiniHeight - nameSize.Height) / 2f));
+
+        // Countdown
+        float timerX = nameX + nameSize.Width + 8;
+        g.DrawString(countdown, timerFont, timerBrush, new PointF(timerX, (MiniHeight - timerSize.Height) / 2f));
+    }
+
     private void DrawInfoButton(
         Graphics g,
         RectangleF rect)
@@ -1494,6 +2081,7 @@ public class MainForm : Form
             );
         }
 
+        int driveAreaBottom = 5 + Math.Max(drives.Count, 1) * ExpandedRowHeight;
         int footerTop = Height - ExpandedFooterHeight;
 
         if (drives.Count > 0)
@@ -1504,7 +2092,7 @@ public class MainForm : Form
                 i++)
             {
                 int rowY = 5 + (i * ExpandedRowHeight);
-                if (rowY + 15 < footerTop)
+                if (rowY + 15 < driveAreaBottom)
                 {
                     var clipState = g.Save();
                     g.SetClip(new RectangleF(0, rowY, Width, Math.Min(ExpandedRowHeight, Math.Max(0, footerTop - rowY))));
@@ -1518,6 +2106,16 @@ public class MainForm : Form
             }
         }
 
+        // Draw Power Timer section between drives and footer
+        int ptTop = driveAreaBottom;
+        if (footerTop > ptTop)
+        {
+            var ptState = g.Save();
+            g.SetClip(new RectangleF(0, ptTop, Width, footerTop - ptTop));
+            DrawPowerTimerSection(g, ptTop);
+            g.Restore(ptState);
+        }
+
         if (footerTop >= 15)
         {
             var footerState = g.Save();
@@ -1526,6 +2124,219 @@ public class MainForm : Form
             g.Restore(footerState);
         }
     }
+
+    // ─────────────────────────────────────────────
+    // Power Timer Drawing (Expanded View)
+    // ─────────────────────────────────────────────
+
+    private void DrawPowerTimerSection(Graphics g, int top)
+    {
+        // Separator line
+        using var separator = new Pen(Color.FromArgb(28, 50, 69), 1);
+        g.DrawLine(separator, 16, top, Width - 16, top);
+
+        // Header row
+        ptHeaderRect = new RectangleF(8, top + 2, Width - 16, PowerTimerHeaderHeight - 4);
+
+        using var headerFont = new Font("Segoe UI Semibold", 10.5f, FontStyle.Bold);
+        using var headerBrush = new SolidBrush(mutedColor);
+        using var chevronFont = new Font("Segoe UI", 9f, FontStyle.Regular);
+
+        // Power icon + label
+        string headerText = "\u23FB  Power Timer";
+
+        // If timer is active, show countdown in header too
+        if (powerTimerActive)
+        {
+            TimeSpan rem = GetPowerTimerRemaining();
+            Color cc = GetCountdownColor(rem);
+            string activeText = $"\u23FB  {PowerActionNames[powerTimerAction]} in {FormatCountdown(rem)}";
+            using var activeBrush = new SolidBrush(cc);
+            g.DrawString(activeText, headerFont, activeBrush, new PointF(18, top + 9));
+        }
+        else
+        {
+            g.DrawString(headerText, headerFont, headerBrush, new PointF(18, top + 9));
+        }
+
+        // Chevron
+        string chevron = powerTimerSectionExpanded ? "\u25B4" : "\u25BE"; // ▴ or ▾
+        SizeF chevSize = g.MeasureString(chevron, chevronFont);
+        g.DrawString(chevron, chevronFont, headerBrush,
+            new PointF(Width - 30, top + (PowerTimerHeaderHeight - chevSize.Height) / 2f));
+
+        if (!powerTimerSectionExpanded) return;
+
+        // Content area
+        int contentTop = top + PowerTimerHeaderHeight;
+
+        if (powerTimerActive)
+        {
+            DrawPowerTimerActiveContent(g, contentTop);
+        }
+        else
+        {
+            DrawPowerTimerSetupContent(g, contentTop);
+        }
+    }
+
+    private void DrawPowerTimerSetupContent(Graphics g, int top)
+    {
+        using var labelFont = new Font("Segoe UI", 9f, FontStyle.Regular);
+        using var btnFont = new Font("Segoe UI Semibold", 9.5f, FontStyle.Bold);
+        using var labelBrush = new SolidBrush(mutedColor);
+        using var whiteBrush = new SolidBrush(Color.White);
+
+        int y = top + 6;
+
+        // Action buttons row
+        float btnWidth = 130;
+        float btnHeight = 30;
+        float gap = 10;
+        float totalWidth = btnWidth * 3 + gap * 2;
+        float startX = (Width - totalWidth) / 2f;
+
+        for (int i = 0; i < 3; i++)
+        {
+            float bx = startX + i * (btnWidth + gap);
+            ptActionRects[i] = new RectangleF(bx, y, btnWidth, btnHeight);
+
+            bool selected = (powerTimerAction == i);
+            Color bgCol = selected ? Color.FromArgb(0, 100, 180) : Color.FromArgb(17, 36, 55);
+            Color borderCol = selected ? Color.FromArgb(0, 145, 255) : Color.FromArgb(44, 67, 89);
+
+            DrawRoundedFill(g, ptActionRects[i], bgCol, 8);
+            using var btnBorder = new Pen(borderCol, 1.2f);
+            using var btnPath = RoundedRectangle(ptActionRects[i], 8);
+            g.DrawPath(btnBorder, btnPath);
+
+            string label = PowerActionNames[i];
+            SizeF labelSize = g.MeasureString(label, btnFont);
+            g.DrawString(label, btnFont, selected ? whiteBrush : labelBrush,
+                new PointF(bx + (btnWidth - labelSize.Width) / 2f, y + (btnHeight - labelSize.Height) / 2f));
+        }
+
+        y += (int)btnHeight + 16;
+
+        // Timer preset row
+        float presetBtnW = 48;
+        float presetBtnH = 30;
+        float presetGap = 8;
+        float presetTotalW = presetBtnW * 4 + presetGap * 3;
+        float customBoxW = 70;
+        float minLabelW = 30;
+        float rowTotalW = presetTotalW + 14 + customBoxW + 6 + minLabelW;
+        float presetStartX = (Width - rowTotalW) / 2f;
+
+        for (int i = 0; i < PresetMinutes.Length; i++)
+        {
+            float px = presetStartX + i * (presetBtnW + presetGap);
+            ptPresetRects[i] = new RectangleF(px, y, presetBtnW, presetBtnH);
+
+            bool selected = (powerTimerSelectedMinutes == PresetMinutes[i]);
+            Color bgCol = selected ? Color.FromArgb(0, 80, 140) : Color.FromArgb(17, 36, 55);
+            Color borderCol = selected ? blueColor : Color.FromArgb(44, 67, 89);
+
+            DrawRoundedFill(g, ptPresetRects[i], bgCol, 7);
+            using var pBorder = new Pen(borderCol, 1f);
+            using var pPath = RoundedRectangle(ptPresetRects[i], 7);
+            g.DrawPath(pBorder, pPath);
+
+            string pLabel = PresetMinutes[i].ToString();
+            SizeF pSize = g.MeasureString(pLabel, btnFont);
+            g.DrawString(pLabel, btnFont, selected ? whiteBrush : labelBrush,
+                new PointF(px + (presetBtnW - pSize.Width) / 2f, y + (presetBtnH - pSize.Height) / 2f));
+        }
+
+        // Custom input box area
+        float customX = presetStartX + presetTotalW + 14;
+        ptCustomBoxRect = new RectangleF(customX, y, customBoxW, presetBtnH);
+        DrawRoundedFill(g, ptCustomBoxRect, Color.FromArgb(17, 36, 55), 7);
+        using var cBorder = new Pen(Color.FromArgb(44, 67, 89), 1f);
+        using var cPath = RoundedRectangle(ptCustomBoxRect, 7);
+        g.DrawPath(cBorder, cPath);
+
+        // "min" label
+        g.DrawString("min", labelFont, labelBrush, new PointF(customX + customBoxW + 6, y + 7));
+
+        PositionCustomMinutesBox();
+
+        y += (int)presetBtnH + 16;
+
+        // Start button
+        float startBtnW = 180;
+        float startBtnH = 34;
+        float startBtnX = (Width - startBtnW) / 2f;
+        ptStartBtnRect = new RectangleF(startBtnX, y, startBtnW, startBtnH);
+
+        DrawRoundedFill(g, ptStartBtnRect, Color.FromArgb(0, 120, 200), 9);
+        using var startBorder = new Pen(Color.FromArgb(0, 160, 255), 1.2f);
+        using var startPath = RoundedRectangle(ptStartBtnRect, 9);
+        g.DrawPath(startBorder, startPath);
+
+        string startLabel = "\u25B6  Start Timer";
+        using var startFont = new Font("Segoe UI Semibold", 10.5f, FontStyle.Bold);
+        SizeF startSize = g.MeasureString(startLabel, startFont);
+        g.DrawString(startLabel, startFont, whiteBrush,
+            new PointF(startBtnX + (startBtnW - startSize.Width) / 2f, y + (startBtnH - startSize.Height) / 2f));
+    }
+
+    private void DrawPowerTimerActiveContent(Graphics g, int top)
+    {
+        TimeSpan remaining = GetPowerTimerRemaining();
+        Color countdownColor = GetCountdownColor(remaining);
+
+        using var actionFont = new Font("Segoe UI Semibold", 14f, FontStyle.Bold);
+        using var timerFont = new Font("Consolas", 28f, FontStyle.Bold);
+        using var labelFont = new Font("Segoe UI", 9.5f, FontStyle.Regular);
+        using var actionBrush = new SolidBrush(mutedColor);
+        using var timerBrush = new SolidBrush(countdownColor);
+        using var whiteBrush = new SolidBrush(Color.White);
+
+        // Action label
+        string actionLabel = $"{PowerActionNames[powerTimerAction]} in";
+        SizeF actionSize = g.MeasureString(actionLabel, actionFont);
+        g.DrawString(actionLabel, actionFont, actionBrush,
+            new PointF((Width - actionSize.Width) / 2f, top + 8));
+
+        // Large countdown
+        string countdown = FormatCountdown(remaining);
+        SizeF countdownSize = g.MeasureString(countdown, timerFont);
+        g.DrawString(countdown, timerFont, timerBrush,
+            new PointF((Width - countdownSize.Width) / 2f, top + 35));
+
+        // Scheduled time label
+        DateTime localEnd = powerTimerEndTime.ToLocalTime();
+        string schedLabel = $"Scheduled at {localEnd:h:mm tt}";
+        SizeF schedSize = g.MeasureString(schedLabel, labelFont);
+        using var schedBrush = new SolidBrush(Color.FromArgb(90, 120, 150));
+        g.DrawString(schedLabel, labelFont, schedBrush,
+            new PointF((Width - schedSize.Width) / 2f, top + 72));
+
+        // Cancel button
+        float cancelBtnW = 160;
+        float cancelBtnH = 32;
+        float cancelBtnX = (Width - cancelBtnW) / 2f;
+        float cancelBtnY = top + 95;
+        ptCancelBtnRect = new RectangleF(cancelBtnX, cancelBtnY, cancelBtnW, cancelBtnH);
+
+        DrawRoundedFill(g, ptCancelBtnRect, Color.FromArgb(60, 20, 20), 9);
+        using var cancelBorder = new Pen(Color.FromArgb(180, 50, 50), 1.2f);
+        using var cancelPath = RoundedRectangle(ptCancelBtnRect, 9);
+        g.DrawPath(cancelBorder, cancelPath);
+
+        string cancelLabel = "\u2715  Cancel Timer";
+        using var cancelFont = new Font("Segoe UI Semibold", 10f, FontStyle.Bold);
+        SizeF cancelSize = g.MeasureString(cancelLabel, cancelFont);
+        using var cancelTextBrush = new SolidBrush(warningColor);
+        g.DrawString(cancelLabel, cancelFont, cancelTextBrush,
+            new PointF(cancelBtnX + (cancelBtnW - cancelSize.Width) / 2f,
+                       cancelBtnY + (cancelBtnH - cancelSize.Height) / 2f));
+    }
+
+    // ─────────────────────────────────────────────
+    // Drive Drawing (existing, preserved)
+    // ─────────────────────────────────────────────
 
     private void DrawExpandedDrive(
         Graphics g,
@@ -1828,7 +2639,7 @@ public class MainForm : Form
             )
         );
 
-        // Right: v1.02
+        // Right: v1.07
         float versionX =
             Width -
             versionSize.Width -
@@ -1885,6 +2696,10 @@ public class MainForm : Form
             )
         );
     }
+
+    // ─────────────────────────────────────────────
+    // Icon Drawing Helpers (existing, preserved)
+    // ─────────────────────────────────────────────
 
     private void DrawMiniDriveIcon(
         Graphics g,
@@ -2037,6 +2852,10 @@ public class MainForm : Form
         );
     }
 
+    // ─────────────────────────────────────────────
+    // Geometry Helpers (existing, preserved)
+    // ─────────────────────────────────────────────
+
     private static void DrawRoundedFill(
         Graphics g,
         RectangleF rectangle,
@@ -2158,6 +2977,10 @@ public class MainForm : Form
         return
             $"{bytes / KB:0.#} KB";
     }
+
+    // ─────────────────────────────────────────────
+    // Inner Classes
+    // ─────────────────────────────────────────────
 
     private sealed class DriveStat
     {
@@ -2339,10 +3162,7 @@ public class MainForm : Form
                     )
                 );
 
-            // -------------------------------------------------
             // Title
-            // -------------------------------------------------
-
             e.Graphics.DrawString(
                 AppName,
                 titleFont,
@@ -2353,11 +3173,7 @@ public class MainForm : Form
                 )
             );
 
-            // -------------------------------------------------
             // Company line
-            // More breathing space below title
-            // -------------------------------------------------
-
             float companyY = 48;
 
             e.Graphics.DrawString(
@@ -2388,10 +3204,7 @@ public class MainForm : Form
                 )
             );
 
-            // -------------------------------------------------
             // Version badge
-            // -------------------------------------------------
-
             RectangleF versionBadge =
                 new RectangleF(
                     18,
@@ -2478,13 +3291,155 @@ public class MainForm : Form
                 new Region(path);
         }
     }
+
+    // ─────────────────────────────────────────────
+    // Power Timer Warning Popup
+    // ─────────────────────────────────────────────
+
+    private sealed class PowerTimerWarningForm : Form
+    {
+        private readonly string actionName;
+        private readonly Color bg;
+        private readonly Color border;
+        private readonly Color muted;
+        private readonly Color warning;
+        private readonly Color accent;
+        private int countdown;
+
+        private RectangleF cancelBtnRect;
+        private RectangleF proceedBtnRect;
+
+        public event EventHandler? CancelRequested;
+        public event EventHandler? ProceedRequested;
+
+        public PowerTimerWarningForm(
+            string action,
+            Color background,
+            Color borderColor,
+            Color mutedColor,
+            Color warningColor,
+            Color accentColor)
+        {
+            actionName = action;
+            bg = background;
+            border = borderColor;
+            muted = mutedColor;
+            warning = warningColor;
+            accent = accentColor;
+            countdown = PowerTimerWarningSeconds;
+
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.Manual;
+            ShowInTaskbar = false;
+            TopMost = true;
+            BackColor = bg;
+            ClientSize = new Size(360, 170);
+            DoubleBuffered = true;
+            AutoScaleMode = AutoScaleMode.None;
+
+            SetStyle(
+                ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.UserPaint |
+                ControlStyles.OptimizedDoubleBuffer,
+                true
+            );
+
+            MouseClick += OnMouseClick;
+            UpdateShape();
+        }
+
+        public void UpdateCountdown(int seconds)
+        {
+            countdown = seconds;
+            Invalidate();
+        }
+
+        protected override bool ShowWithoutActivation => false; // This one SHOULD activate
+
+        private void OnMouseClick(object? sender, MouseEventArgs e)
+        {
+            if (cancelBtnRect.Contains(e.Location))
+                CancelRequested?.Invoke(this, EventArgs.Empty);
+            else if (proceedBtnRect.Contains(e.Location))
+                ProceedRequested?.Invoke(this, EventArgs.Empty);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            g.Clear(bg);
+
+            // Border
+            using var borderPen = new Pen(warning, 1.8f);
+            using var bodyPath = MainForm.RoundedRectangle(new RectangleF(1, 1, Width - 3, Height - 3), 16);
+            g.DrawPath(borderPen, bodyPath);
+
+            using var titleFont = new Font("Segoe UI Semibold", 13f, FontStyle.Bold);
+            using var subtitleFont = new Font("Segoe UI", 10.5f, FontStyle.Regular);
+            using var countdownFont = new Font("Consolas", 18f, FontStyle.Bold);
+            using var btnFont = new Font("Segoe UI Semibold", 10f, FontStyle.Bold);
+            using var whiteBrush = new SolidBrush(Color.White);
+            using var warningBrush = new SolidBrush(warning);
+            using var mutedBrush = new SolidBrush(muted);
+
+            // Warning icon + title
+            string title = $"\u26A0  System {actionName} in {countdown}s";
+            SizeF titleSize = g.MeasureString(title, titleFont);
+            g.DrawString(title, titleFont, warningBrush, new PointF((Width - titleSize.Width) / 2f, 20));
+
+            // Subtitle
+            string sub = "Save your work!";
+            SizeF subSize = g.MeasureString(sub, subtitleFont);
+            g.DrawString(sub, subtitleFont, mutedBrush, new PointF((Width - subSize.Width) / 2f, 55));
+
+            // Progress bar showing remaining time
+            float barX = 30;
+            float barY = 85;
+            float barW = Width - 60;
+            float barH = 5;
+            float progress = Math.Max(0, Math.Min(1f, countdown / (float)PowerTimerWarningSeconds));
+
+            MainForm.DrawRoundedFill(g, new RectangleF(barX, barY, barW, barH), Color.FromArgb(31, 52, 72), 2.5f);
+            if (progress > 0.01f)
+                MainForm.DrawRoundedFill(g, new RectangleF(barX, barY, barW * progress, barH), warning, 2.5f);
+
+            // Buttons
+            float btnW = 130;
+            float btnH = 34;
+            float btnY = 105;
+            float gap = 20;
+
+            cancelBtnRect = new RectangleF(Width / 2f - btnW - gap / 2f, btnY, btnW, btnH);
+            proceedBtnRect = new RectangleF(Width / 2f + gap / 2f, btnY, btnW, btnH);
+
+            // Cancel button
+            MainForm.DrawRoundedFill(g, cancelBtnRect, Color.FromArgb(17, 36, 55), 9);
+            using var cBorder = new Pen(Color.FromArgb(44, 67, 89), 1.2f);
+            using var cPath = MainForm.RoundedRectangle(cancelBtnRect, 9);
+            g.DrawPath(cBorder, cPath);
+            string cLabel = "Cancel";
+            SizeF cSize = g.MeasureString(cLabel, btnFont);
+            g.DrawString(cLabel, btnFont, whiteBrush,
+                new PointF(cancelBtnRect.X + (btnW - cSize.Width) / 2f, btnY + (btnH - cSize.Height) / 2f));
+
+            // Proceed button
+            MainForm.DrawRoundedFill(g, proceedBtnRect, Color.FromArgb(140, 30, 30), 9);
+            using var pBorder = new Pen(warning, 1.2f);
+            using var pPath = MainForm.RoundedRectangle(proceedBtnRect, 9);
+            g.DrawPath(pBorder, pPath);
+            string pLabel = "Proceed Now";
+            SizeF pSize = g.MeasureString(pLabel, btnFont);
+            g.DrawString(pLabel, btnFont, whiteBrush,
+                new PointF(proceedBtnRect.X + (btnW - pSize.Width) / 2f, btnY + (btnH - pSize.Height) / 2f));
+        }
+
+        private void UpdateShape()
+        {
+            using var path = MainForm.RoundedRectangle(new RectangleF(0, 0, Width, Height), 16);
+            Region = new Region(path);
+        }
+    }
 }
-
-
-
-
-
-
-
-
-
