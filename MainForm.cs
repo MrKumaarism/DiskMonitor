@@ -82,7 +82,7 @@ public class MainForm : Form
 
     // Power Timer section layout constants
     private const int PowerTimerHeaderHeight = 38;
-    private const int PowerTimerContentHeight = 130;
+    private const int PowerTimerContentHeight = 152;
     private const int PowerTimerWarningSeconds = 30;
 
     // Power Timer state
@@ -400,9 +400,26 @@ public class MainForm : Form
         SavePowerTimerPreference();
 
         if (!expanded)
+        {
             StartSizeAnimation();
+        }
         else
+        {
             Invalidate();
+
+            // Auto-collapse after 1.5 seconds of activating the timer
+            var startCollapseDelay = new System.Windows.Forms.Timer { Interval = 1500 };
+            startCollapseDelay.Tick += (_, _) =>
+            {
+                startCollapseDelay.Stop();
+                startCollapseDelay.Dispose();
+                if (expanded && powerTimerActive)
+                {
+                    ToggleExpanded();
+                }
+            };
+            startCollapseDelay.Start();
+        }
     }
 
     private void CancelPowerTimer()
@@ -1442,8 +1459,8 @@ public class MainForm : Form
 
             collapseTimer.Tick += (_, _) =>
             {
-                // Do not auto-collapse while configuring Power Timer settings or typing
-                if (powerTimerSectionExpanded || (customMinutesBox != null && customMinutesBox.Focused))
+                // Do not auto-collapse while actively configuring Power Timer settings or typing
+                if (!powerTimerActive && (powerTimerSectionExpanded || (customMinutesBox != null && customMinutesBox.Focused)))
                 {
                     StartCollapseTimer();
                     return;
@@ -2205,7 +2222,7 @@ public class MainForm : Form
         using var labelBrush = new SolidBrush(mutedColor);
         using var whiteBrush = new SolidBrush(Color.White);
 
-        int y = top + 6;
+        int y = top + 8;
 
         // Action buttons row
         float btnWidth = 130;
@@ -2234,7 +2251,7 @@ public class MainForm : Form
                 new PointF(bx + (btnWidth - labelSize.Width) / 2f, y + (btnHeight - labelSize.Height) / 2f));
         }
 
-        y += (int)btnHeight + 16;
+        y += (int)btnHeight + 12;
 
         // Timer preset row
         float presetBtnW = 48;
@@ -2279,7 +2296,7 @@ public class MainForm : Form
 
         PositionCustomMinutesBox();
 
-        y += (int)presetBtnH + 16;
+        y += (int)presetBtnH + 14;
 
         // Start button
         float startBtnW = 180;
@@ -2304,9 +2321,9 @@ public class MainForm : Form
         TimeSpan remaining = GetPowerTimerRemaining();
         Color countdownColor = GetCountdownColor(remaining);
 
-        using var actionFont = new Font("Segoe UI Semibold", 14f, FontStyle.Bold);
+        using var actionFont = new Font("Segoe UI Semibold", 11.5f, FontStyle.Bold);
         using var timerFont = new Font("Consolas", 28f, FontStyle.Bold);
-        using var labelFont = new Font("Segoe UI", 9.5f, FontStyle.Regular);
+        using var labelFont = new Font("Segoe UI", 9f, FontStyle.Regular);
         using var actionBrush = new SolidBrush(mutedColor);
         using var timerBrush = new SolidBrush(countdownColor);
         using var whiteBrush = new SolidBrush(Color.White);
@@ -2321,21 +2338,21 @@ public class MainForm : Form
         string countdown = FormatCountdown(remaining);
         SizeF countdownSize = g.MeasureString(countdown, timerFont);
         g.DrawString(countdown, timerFont, timerBrush,
-            new PointF((Width - countdownSize.Width) / 2f, top + 35));
+            new PointF((Width - countdownSize.Width) / 2f, top + 28));
 
         // Scheduled time label
         DateTime localEnd = powerTimerEndTime.ToLocalTime();
         string schedLabel = $"Scheduled at {localEnd:h:mm tt}";
         SizeF schedSize = g.MeasureString(schedLabel, labelFont);
-        using var schedBrush = new SolidBrush(Color.FromArgb(90, 120, 150));
+        using var schedBrush = new SolidBrush(Color.FromArgb(100, 130, 160));
         g.DrawString(schedLabel, labelFont, schedBrush,
-            new PointF((Width - schedSize.Width) / 2f, top + 72));
+            new PointF((Width - schedSize.Width) / 2f, top + 74));
 
         // Cancel button
         float cancelBtnW = 160;
         float cancelBtnH = 32;
         float cancelBtnX = (Width - cancelBtnW) / 2f;
-        float cancelBtnY = top + 95;
+        float cancelBtnY = top + 104;
         ptCancelBtnRect = new RectangleF(cancelBtnX, cancelBtnY, cancelBtnW, cancelBtnH);
 
         DrawRoundedFill(g, ptCancelBtnRect, Color.FromArgb(60, 20, 20), 9);
