@@ -64,6 +64,7 @@ public class MainForm : Form
     private bool mouseHeld;
     private bool dragging;
     private bool infoPressed;
+    private bool powerTimerPressed;
 
     private Point dragStartCursor;
     private Point dragStartWindow;
@@ -604,9 +605,13 @@ public class MainForm : Form
 
         // Check power timer hit regions in expanded view
         if (expanded && HandlePowerTimerClick(e.Location))
+        {
+            powerTimerPressed = true;
             return;
+        }
 
         infoPressed = false;
+        powerTimerPressed = false;
         mouseHeld = true;
         dragging = false;
 
@@ -655,6 +660,12 @@ public class MainForm : Form
     {
         if (e.Button != MouseButtons.Left)
             return;
+
+        if (powerTimerPressed)
+        {
+            powerTimerPressed = false;
+            return;
+        }
 
         if (infoPressed)
         {
@@ -1431,6 +1442,13 @@ public class MainForm : Form
 
             collapseTimer.Tick += (_, _) =>
             {
+                // Do not auto-collapse while configuring Power Timer settings or typing
+                if (powerTimerSectionExpanded || (customMinutesBox != null && customMinutesBox.Focused))
+                {
+                    StartCollapseTimer();
+                    return;
+                }
+
                 StopCollapseTimer();
 
                 if (expanded)
