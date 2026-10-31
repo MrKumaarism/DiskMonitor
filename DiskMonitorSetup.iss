@@ -25,8 +25,8 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 
-CloseApplications=force
-CloseApplicationsFilter=*.exe
+CloseApplications=no
+RestartApplications=no
 
 UninstallDisplayName=DiskMonitor
 UninstallDisplayIcon={app}\{#MyAppExeName}
@@ -60,6 +60,15 @@ const
 
   StartupApprovedFolder =
     'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder';
+
+function InitializeSetup(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  // Terminate any running DiskMonitor instance immediately before wizard opens
+  Exec('taskkill.exe', '/f /im DiskMonitor.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Result := True;
+end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var

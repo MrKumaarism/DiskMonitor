@@ -42,7 +42,7 @@ public class MainForm : Form
     private const int AutoCollapseSeconds = 8;
 
     // Smooth expand/collapse animation settings
-    private const int AnimDurationMs = 210;
+    private const int AnimDurationMs = 340;
     private System.Windows.Forms.Timer? animTimer;
     private DateTime animStartTime;
     private Size animStartSize;
@@ -82,7 +82,7 @@ public class MainForm : Form
 
     // Power Timer section layout constants
     private const int PowerTimerHeaderHeight = 38;
-    private const int PowerTimerContentHeight = 152;
+    private const int PowerTimerContentHeight = 175;
     private const int PowerTimerWarningSeconds = 30;
 
     // Power Timer state
@@ -1366,10 +1366,7 @@ public class MainForm : Form
         int count = Math.Max(drives.Count, 1);
         if (isExpanded)
         {
-            int height = (count * ExpandedRowHeight) + ExpandedFooterHeight;
-
-            // Add power timer header
-            height += PowerTimerHeaderHeight;
+            int height = (count * ExpandedRowHeight) + PowerTimerHeaderHeight + ExpandedFooterHeight;
 
             // Add power timer content if section is expanded
             if (powerTimerSectionExpanded)
@@ -1379,14 +1376,51 @@ public class MainForm : Form
         }
         else
         {
-            int width = 178 + ((count - 1) * 118);
-
-            // When timer is active, ensure enough width for countdown text
-            if (powerTimerActive)
-                width = Math.Max(width, 230);
-
-            return new Size(width, MiniHeight);
+            return new Size(GetMiniBarTimerTargetWidth(), MiniHeight);
         }
+    }
+
+    private int GetMiniBarTimerTargetWidth()
+    {
+        int defaultWidth = 178 + ((Math.Max(drives.Count, 1) - 1) * 118);
+
+        if (!powerTimerActive)
+            return defaultWidth;
+
+        string actionName = PowerActionNames[powerTimerAction];
+
+        // Format template digits based on scheduled time so width stays stable throughout countdown
+        int totalHours = powerTimerSelectedMinutes / 60;
+        string templateDigits;
+        if (totalHours >= 100)
+            templateDigits = "888:88:88";
+        else if (totalHours >= 10)
+            templateDigits = "88:88:88";
+        else if (totalHours >= 1)
+            templateDigits = "8:88:88";
+        else
+            templateDigits = "88:88";
+
+        TimeSpan rem = GetPowerTimerRemaining();
+        string currentFormatted = FormatCountdown(rem);
+        if (currentFormatted.Length > templateDigits.Length)
+            templateDigits = currentFormatted;
+
+        using var iconFont = new Font("Segoe UI", 12.5f, FontStyle.Regular);
+        using var actionFont = new Font("Segoe UI Semibold", 9.5f, FontStyle.Bold);
+        using var timerFont = new Font("Consolas", 12.5f, FontStyle.Bold);
+
+        Size iconSz = TextRenderer.MeasureText("\u23FB", iconFont);
+        Size actionSz = TextRenderer.MeasureText(actionName, actionFont);
+        Size timerSz = TextRenderer.MeasureText(templateDigits, timerFont);
+
+        // Gap between icon and action: 6px, between action and timer: 10px
+        int contentW = iconSz.Width + 6 + actionSz.Width + 10 + timerSz.Width;
+
+        // Rounded pill capsule padding (28px each side = 56px total) to ensure text is never clipped
+        int calculatedWidth = contentW + 56;
+
+        return Math.Max(defaultWidth, calculatedWidth);
     }
 
     private void StartSizeAnimation()
@@ -1420,8 +1454,8 @@ public class MainForm : Form
         double elapsed = (DateTime.UtcNow - animStartTime).TotalMilliseconds;
         double t = Math.Min(1.0, elapsed / AnimDurationMs);
 
-        // Quintic/Cubic Ease-Out for a buttery smooth deceleration landing
-        double ease = 1.0 - Math.Pow(1.0 - t, 3);
+        // Quartic Ease-Out for a subtle, buttery-smooth gliding deceleration
+        double ease = 1.0 - Math.Pow(1.0 - t, 4);
 
         int curW = (int)Math.Round(animStartSize.Width + (animTargetSize.Width - animStartSize.Width) * ease);
         int curH = (int)Math.Round(animStartSize.Height + (animTargetSize.Height - animStartSize.Height) * ease);
@@ -1988,29 +2022,52 @@ public class MainForm : Form
         string actionName = PowerActionNames[powerTimerAction];
         string countdown = FormatCountdown(remaining);
 
+        float timerFontSize = 12.5f;
+        float actionFontSize = 9.5f;
+
+        // Auto-responsive font sizing: calculate natural dimensions and scale if width is constrained
         using var iconFont = new Font("Segoe UI", 12.5f, FontStyle.Regular);
-        using var actionFont = new Font("Segoe UI Semibold", 9.5f, FontStyle.Bold);
-        using var timerFont = new Font("Consolas", 12.5f, FontStyle.Bold);
+        using var testTimerFont = new Font("Consolas", timerFontSize, FontStyle.Bold);
+        using var testActionFont = new Font("Segoe UI Semibold", actionFontSize, FontStyle.Bold);
+
+        SizeF iconSize = g.MeasureString("\u23FB", iconFont);
+        SizeF nameSize = g.MeasureString(actionName, testActionFont);
+        SizeF timerSize = g.MeasureString(countdown, testTimerFont);
+
+        float gap1 = 6f;
+        float gap2 = 10f;
+        float totalW = iconSize.Width + gap1 + nameSize.Width + gap2 + timerSize.Width;
+
+        // Minibar capsule has 22px curves on both ends. Ensure content never touches curves.
+        float safeUsableWidth = Width - 48f;
+        if (totalW > safeUsableWidth && safeUsableWidth > 50f)
+        {
+            float scale = safeUsableWidth / totalW;
+            timerFontSize = Math.Max(8.5f, timerFontSize * scale);
+            actionFontSize = Math.Max(7.5f, actionFontSize * scale);
+        }
+
+        using var actionFont = new Font("Segoe UI Semibold", actionFontSize, FontStyle.Bold);
+        using var timerFont = new Font("Consolas", timerFontSize, FontStyle.Bold);
         using var actionBrush = new SolidBrush(mutedColor);
         using var timerBrush = new SolidBrush(countdownColor);
 
+        iconSize = g.MeasureString("\u23FB", iconFont);
+        nameSize = g.MeasureString(actionName, actionFont);
+        timerSize = g.MeasureString(countdown, timerFont);
+        totalW = iconSize.Width + gap1 + nameSize.Width + gap2 + timerSize.Width;
+
+        float startX = Math.Max(18f, (Width - totalW) / 2f);
+
         // Power icon
-        string icon = "\u23FB"; // ⏻
-        SizeF iconSize = g.MeasureString(icon, iconFont);
-        SizeF nameSize = g.MeasureString(actionName, actionFont);
-        SizeF timerSize = g.MeasureString(countdown, timerFont);
-
-        float totalW = iconSize.Width + 4 + nameSize.Width + 8 + timerSize.Width;
-        float startX = Math.Max(12, (Width - totalW) / 2f);
-
-        g.DrawString(icon, iconFont, timerBrush, new PointF(startX, (MiniHeight - iconSize.Height) / 2f));
+        g.DrawString("\u23FB", iconFont, timerBrush, new PointF(startX, (MiniHeight - iconSize.Height) / 2f));
 
         // Action name
-        float nameX = startX + iconSize.Width + 4;
+        float nameX = startX + iconSize.Width + gap1;
         g.DrawString(actionName, actionFont, actionBrush, new PointF(nameX, (MiniHeight - nameSize.Height) / 2f));
 
         // Countdown
-        float timerX = nameX + nameSize.Width + 8;
+        float timerX = nameX + nameSize.Width + gap2;
         g.DrawString(countdown, timerFont, timerBrush, new PointF(timerX, (MiniHeight - timerSize.Height) / 2f));
     }
 
@@ -2116,7 +2173,7 @@ public class MainForm : Form
             );
         }
 
-        int driveAreaBottom = 5 + Math.Max(drives.Count, 1) * ExpandedRowHeight;
+        int driveAreaBottom = Math.Max(drives.Count, 1) * ExpandedRowHeight;
         int footerTop = Height - ExpandedFooterHeight;
 
         if (drives.Count > 0)
@@ -2126,7 +2183,7 @@ public class MainForm : Form
                 i < drives.Count;
                 i++)
             {
-                int rowY = 5 + (i * ExpandedRowHeight);
+                int rowY = i * ExpandedRowHeight;
                 if (rowY + 15 < driveAreaBottom)
                 {
                     var clipState = g.Save();
@@ -2222,11 +2279,11 @@ public class MainForm : Form
         using var labelBrush = new SolidBrush(mutedColor);
         using var whiteBrush = new SolidBrush(Color.White);
 
-        int y = top + 8;
+        int y = top + 12;
 
         // Action buttons row
         float btnWidth = 130;
-        float btnHeight = 30;
+        float btnHeight = 32;
         float gap = 10;
         float totalWidth = btnWidth * 3 + gap * 2;
         float startX = (Width - totalWidth) / 2f;
@@ -2251,11 +2308,11 @@ public class MainForm : Form
                 new PointF(bx + (btnWidth - labelSize.Width) / 2f, y + (btnHeight - labelSize.Height) / 2f));
         }
 
-        y += (int)btnHeight + 12;
+        y += (int)btnHeight + 14;
 
         // Timer preset row
         float presetBtnW = 48;
-        float presetBtnH = 30;
+        float presetBtnH = 32;
         float presetGap = 8;
         float presetTotalW = presetBtnW * 4 + presetGap * 3;
         float customBoxW = 70;
@@ -2292,15 +2349,15 @@ public class MainForm : Form
         g.DrawPath(cBorder, cPath);
 
         // "min" label
-        g.DrawString("min", labelFont, labelBrush, new PointF(customX + customBoxW + 6, y + 7));
+        g.DrawString("min", labelFont, labelBrush, new PointF(customX + customBoxW + 6, y + 8));
 
         PositionCustomMinutesBox();
 
-        y += (int)presetBtnH + 14;
+        y += (int)presetBtnH + 18;
 
         // Start button
         float startBtnW = 180;
-        float startBtnH = 34;
+        float startBtnH = 36;
         float startBtnX = (Width - startBtnW) / 2f;
         ptStartBtnRect = new RectangleF(startBtnX, y, startBtnW, startBtnH);
 
@@ -2323,36 +2380,36 @@ public class MainForm : Form
 
         using var actionFont = new Font("Segoe UI Semibold", 11.5f, FontStyle.Bold);
         using var timerFont = new Font("Consolas", 28f, FontStyle.Bold);
-        using var labelFont = new Font("Segoe UI", 9f, FontStyle.Regular);
+        using var labelFont = new Font("Segoe UI", 9.5f, FontStyle.Regular);
         using var actionBrush = new SolidBrush(mutedColor);
         using var timerBrush = new SolidBrush(countdownColor);
         using var whiteBrush = new SolidBrush(Color.White);
 
-        // Action label
+        // Action label (e.g. "Hibernate in", "Shutdown in", "Sleep in")
         string actionLabel = $"{PowerActionNames[powerTimerAction]} in";
         SizeF actionSize = g.MeasureString(actionLabel, actionFont);
         g.DrawString(actionLabel, actionFont, actionBrush,
-            new PointF((Width - actionSize.Width) / 2f, top + 8));
+            new PointF((Width - actionSize.Width) / 2f, top + 10));
 
-        // Large countdown
+        // Large countdown (e.g. "2:59:39" or "29:55")
         string countdown = FormatCountdown(remaining);
         SizeF countdownSize = g.MeasureString(countdown, timerFont);
         g.DrawString(countdown, timerFont, timerBrush,
-            new PointF((Width - countdownSize.Width) / 2f, top + 28));
+            new PointF((Width - countdownSize.Width) / 2f, top + 32));
 
-        // Scheduled time label
+        // Scheduled time label (e.g. "Scheduled at 3:26 PM")
         DateTime localEnd = powerTimerEndTime.ToLocalTime();
         string schedLabel = $"Scheduled at {localEnd:h:mm tt}";
         SizeF schedSize = g.MeasureString(schedLabel, labelFont);
-        using var schedBrush = new SolidBrush(Color.FromArgb(100, 130, 160));
+        using var schedBrush = new SolidBrush(Color.FromArgb(120, 155, 185));
         g.DrawString(schedLabel, labelFont, schedBrush,
-            new PointF((Width - schedSize.Width) / 2f, top + 74));
+            new PointF((Width - schedSize.Width) / 2f, top + 84));
 
         // Cancel button
         float cancelBtnW = 160;
-        float cancelBtnH = 32;
+        float cancelBtnH = 34;
         float cancelBtnX = (Width - cancelBtnW) / 2f;
-        float cancelBtnY = top + 104;
+        float cancelBtnY = top + 116;
         ptCancelBtnRect = new RectangleF(cancelBtnX, cancelBtnY, cancelBtnW, cancelBtnH);
 
         DrawRoundedFill(g, ptCancelBtnRect, Color.FromArgb(60, 20, 20), 9);
